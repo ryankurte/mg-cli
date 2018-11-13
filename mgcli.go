@@ -1,3 +1,8 @@
+// mg-cli
+// A command line utility for managing and using mailgun lists
+// 
+// Copyright 2018 Ryan Kurte
+
 package main
 
 import (

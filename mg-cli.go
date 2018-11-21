@@ -1,12 +1,14 @@
 // mg-cli
 // A command line utility for managing and using mailgun lists
-// 
+//
 // Copyright 2018 Ryan Kurte
 
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"time"
 
@@ -20,6 +22,7 @@ type Config struct {
 
 	GetLists  GetLists  `command:"get-lists" description:"Fetch existing mailing lists"`
 	AddList   AddList   `command:"create-list" description:"Create a new mailing list"`
+	SyncLists SyncLists `command:"sync-lists" description:"Synchronize existing and desired lists"`
 	AddMember AddMember `command:"add-member" description:"Add a member to a list"`
 	Send      Send      `command:"send" description:"Send an email to a list or address"`
 
@@ -50,12 +53,18 @@ type limitAndSkip struct {
 type GetLists struct {
 	limitAndSkip
 	Filter string `long:"filter" description:"List filter"`
+	File   string `long:"file" description:"File to write retrieved lists"`
 }
 
 type AddList struct {
 	Address     string `long:"address" description:"List address" required:"true"`
 	Name        string `long:"name" description:"List name" required:"true"`
 	Description string `long:"description" description:"List description"`
+}
+
+type SyncLists struct {
+	Apply bool   `long:"apply" description:"Apply changes (this will edit your lists!)"`
+	File  string `long:"file" description:"File containing desired lists" required:"true"`
 }
 
 type AddMember struct {
@@ -88,13 +97,23 @@ func main() {
 
 	switch p.Active.Name {
 	case "get-lists":
+		// Fetch lists from mailgun
 		_, lists, err := mg.GetLists(c.GetLists.Limit, c.GetLists.Offset, c.GetLists.Filter)
 		if err != nil {
 			fmt.Printf("Error fetching list: '%s'\n", err)
 			os.Exit(-2)
 		}
 		fmt.Printf("Lists: %+v", lists)
+
+		// Write to file if requested
+		if c.GetLists.File != "" {
+			l := ListArrFromMailgun(lists)
+			d, _ := json.MarshalIndent(l, "", "    ")
+			ioutil.WriteFile(c.GetLists.File, d, 0644)
+		}
+
 	case "create-list":
+		// Create a new list
 		list := mailgun.List{Address: c.AddList.Address, Name: c.AddList.Name, Description: c.AddList.Description}
 		list, err := mg.CreateList(list)
 		if err != nil {
@@ -102,6 +121,61 @@ func main() {
 			os.Exit(-3)
 		}
 		fmt.Printf("Created list")
+
+	case "sync-lists":
+		// Fetch existing lists
+		_, lists, err := mg.GetLists(100, 0, "")
+		if err != nil {
+			fmt.Printf("Error fetching existing lists: '%s'\n", err)
+			os.Exit(-2)
+		}
+		existing := ListArrFromMailgun(lists)
+
+		// Read desired lists
+		file, err := ioutil.ReadFile(c.SyncLists.File)
+		if err != nil {
+			fmt.Printf("Error loading desired lists: '%s'\n", err)
+			os.Exit(-2)
+		}
+		desired := NewListArr()
+		err = json.Unmarshal(file, &desired)
+		if err != nil {
+			fmt.Printf("Error parsing desired lists: '%s'\n", err)
+			os.Exit(-2)
+		}
+
+		// Calculate differences
+		ok, add, rem, update := Difference(desired, existing)
+		fmt.Printf("ok: %v\n", ok)
+		fmt.Printf("add: %v\n", add)
+		fmt.Printf("rem: %v\n", rem)
+		fmt.Printf("update: %v\n", update)
+
+		// Apply changes if specified
+		if c.SyncLists.Apply {
+			for _, l := range add {
+				_, err := mg.CreateList(ListToMailgun(l))
+				if err != nil {
+					fmt.Printf("Error adding list: '%s'\n", err)
+					os.Exit(-2)
+				}
+			}
+			for _, l := range rem {
+				err := mg.DeleteList(l.Address)
+				if err != nil {
+					fmt.Printf("Error deleting list: '%s'\n", err)
+					os.Exit(-2)
+				}
+			}
+			for _, l := range update {
+				_, err := mg.UpdateList(l.Address, ListToMailgun(l))
+				if err != nil {
+					fmt.Printf("Error updating list: '%s'\n", err)
+					os.Exit(-2)
+				}
+			}
+		}
+
 	case "add-member":
 		subscribed, merge := !c.AddMember.Unsubscribed, !c.AddMember.NoMerge
 		member := mailgun.Member{Address: c.AddMember.Address, Name: c.AddMember.Name, Subscribed: &subscribed, Vars: c.AddMember.Vars}
